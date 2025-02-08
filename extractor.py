@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+
 from collections import deque
 from typing import Optional, List, Tuple
 
@@ -7,8 +8,10 @@ from typing import Optional, List, Tuple
 class FeatureExtractor:
     def __init__(self):
         self.orb_detector: cv2.ORB = cv2.ORB_create()  # type: ignore
-        self.bf_matcher: cv2.BFMatcher = cv2.BFMatcher(
-            cv2.NORM_HAMMING, crossCheck=False)
+        self.FLANN_INDEX_LSH = 6
+        self.index_params = dict(algorithm=self.FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
+        self.search_params = dict(checks=50)
+        self.flann_matcher = cv2.FlannBasedMatcher(self.index_params, self.search_params)
 
         self.previous_frame: Optional[np.ndarray] = None
         self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
@@ -44,14 +47,24 @@ class FeatureExtractor:
             print("[WARNING] ORB failed to compute descriptors! No matches found.")
             return []
 
-        matches: List[List[cv2.DMatch]] = self.bf_matcher.knnMatch(
-            descriptors1, descriptors2, k=2)  # type: ignore
+        descriptors1 = np.uint8(descriptors1)
+        descriptors2 = np.uint8(descriptors2)
 
-        good_matches: List[Tuple[cv2.KeyPoint, cv2.KeyPoint]] = []
-        for m, n in matches:
+        matches: List[List[cv2.DMatch]] = self.flann_matcher.knnMatch(descriptors1, descriptors2, k=2)
+
+        good_matches:List[Tuple[cv2.KeyPoint, cv2.KeyPoint]] = []
+
+        print(len(matches))
+
+        for _, pair in enumerate(matches):
+            if len(pair) < 2:
+                continue
+
+            m, n = pair
             if m.distance < 0.75 * n.distance:
-                good_matches.append(
-                    (keypoints1[m.queryIdx], keypoints2[m.trainIdx]))
+                good_matches.append((keypoints1[m.queryIdx], keypoints2[m.trainIdx]))
+
+        print(f'FLANN Matcher: {len(good_matches)}')
 
         self.visualize_features(good_matches, current_frame)
         return matches
@@ -63,7 +76,7 @@ class FeatureExtractor:
             x1, y1 = int(kp1.pt[0]), int(kp1.pt[1])
             x2, y2 = int(kp2.pt[0]), int(kp2.pt[1])
 
-            print(f"Matching points: ({x1}, {y1}) ↔ ({x2}, {y2})")
+            # print(f"Matching points: ({x1}, {y1}) ↔ ({x2}, {y2})")
 
             cv2.circle(current_frame, (x1, y1), 3, (0, 255, 0), -1)
             cv2.circle(current_frame, (x2, y2), 3, (0, 255, 0), -1)
