@@ -25,12 +25,12 @@ class FeatureExtractor:
     def __init__(self, WIDTH: int, HEIGHT: int):
         self.orb_detector: cv2.ORB = cv2.ORB_create()  # type: ignore
         self.FLANN_INDEX_LSH = 6
-        self.WIDTH = WIDTH
-        self.HEIGHT = HEIGHT
-        self.index_params = dict(algorithm=self.FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
-        self.search_params = dict(checks=50)
-        self.flann_matcher = cv2.FlannBasedMatcher(self.index_params, self.search_params)
-        self.K: np.array = np.array([[554, 0, WIDTH // 2], [0, 554, HEIGHT // 2], [0, 0, 1]])
+        self.WIDTH: int = WIDTH
+        self.HEIGHT: int = HEIGHT
+        self.index_params: dict = dict(algorithm=self.FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
+        self.search_params: dict = dict(checks=50)
+        self.flann_matcher: cv2.FlannBasedMatcher = cv2.FlannBasedMatcher(self.index_params, self.search_params)
+        self.K: np.ndarray = np.array([[554, 0, WIDTH // 2], [0, 554, HEIGHT // 2], [0, 0, 1]])
 
         self.previous_frame: Optional[np.ndarray] = None
         self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
@@ -38,9 +38,15 @@ class FeatureExtractor:
 
     def extract_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], Optional[np.ndarray]]:
         current_frame: np.ndarray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        keypoints, descriptors = self.orb_detector.detectAndCompute(
-            current_frame, np.array([]))
 
+        corners: Optional[np.ndarray] = cv2.goodFeaturesToTrack(current_frame, 200, 0.005, 10)
+
+        if corners is not None:
+            keypoints: List[cv2.KeyPoint] = [cv2.KeyPoint(float(c[0][0]), float(c[0][1]), size=20) for c in corners]
+            keypoints, descriptors = self.orb_detector.compute(current_frame, keypoints)
+        else:
+            keypoints, descriptors = self.orb_detector.detectAndCompute(
+                current_frame, None)
 
         if descriptors is not None:
             self.store_descriptors.append(
@@ -50,53 +56,43 @@ class FeatureExtractor:
             (keypoints1, descriptor1), (keypoints2,
                                         descriptor2) = self.store_descriptors
 
-            fundamental_matrix = self.estimate_camera_motion(keypoints1, keypoints2)
-            logger.info(fundamental_matrix)
-
-
-
-            self.match_features(descriptor1, descriptor2,
+            good_features: List[Tuple[cv2.KeyPoint, cv2.KeyPoint]] = self.match_features(descriptor1, descriptor2,
                                 keypoints1, keypoints2, current_frame)
 
+            print(f"Number of good features: {len(good_features)}")
 
-        return list(keypoints), descriptors
+            if len(good_features) >= 8:
+                pts1: np.ndarray = np.float32([kp1.pt for kp1, _ in good_features])
+                pts2: np.ndarray = np.float32([kp2.pt for _, kp2 in good_features])
+                pose: Optional[Tuple[np.ndarray, np.ndarray]] = self.estimate_camera_motion(pts1, pts2)
 
-    def estimate_camera_motion(self, keypoints1: List[cv2.KeyPoint], keypoints2: List[cv2.KeyPoint]) -> np.ndarray:
-        if len(keypoints1) < 8 or len(keypoints2) < 8:
-            logger.warning("[WARNING] Not enough keypoints for motion estimation!")
+                if pose is not None:
+                    R, t = pose
+                    logger.info(f"Rotation: {R}, Translation: {t}")
+
+        return keypoints, descriptors
+
+    def estimate_camera_motion(self, pts1: np.ndarray, pts2: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        if pts1.shape[0] < 8 or pts2.shape[0] < 8:
+            logger.warning("[WARNING] Not enough points to estimate camera motion!")
             return None
 
-        keypoints1 = np.float32([kp.pt for kp in keypoints1])
-        keypoints2 = np.float32([kp.pt for kp in keypoints2])
-
-        fundamental_matrix, mask = cv2.findFundamentalMat(keypoints1, keypoints2, cv2.FM_RANSAC)
-
-        if fundamental_matrix is None or fundamental_matrix.shape != (3, 3):
-            logger.warning("[WARNING] Fundamental matrix computation failed!")
-            return None
-
-        logger.info(f"Fundamental Matrix:\n{fundamental_matrix}")
-
-        inlier_keypoints1 = keypoints1[mask.ravel() == 1]
-        inlier_keypoints2 = keypoints2[mask.ravel() == 1]
-
-        if len(inlier_keypoints1) < 8 or len(inlier_keypoints2) < 8:
-            logger.warning("[WARNING] Not enough inliers for essential matrix computation!")
-            return None
-
-        essential_matrix, mask_E = cv2.findEssentialMat(inlier_keypoints1, inlier_keypoints2, self.K, method=cv2.RANSAC, threshold=1.0)
+        essential_matrix, mask = cv2.findEssentialMat(pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=1)
 
         if essential_matrix is None:
-            logger.warning("[WARNING] Essential matrix computation failed!")
+            logger.warning("[WARNING] Essential matrix is None!")
             return None
 
-        logger.info(f"Essential Matrix:\n{essential_matrix}")
+        logger.info(f"Essential matrix: {essential_matrix}")
 
-        _, R, t, _ = cv2.recoverPose(essential_matrix, inlier_keypoints1, inlier_keypoints2, self.K)
+        inlier_pts1: np.ndarray = pts1[mask.ravel() == 1]
+        inlier_pts2: np.ndarray = pts2[mask.ravel() == 1]
 
-        logger.info(f"Rotation:\n{R}")
-        logger.info(f"Translation:\n{t}")
+        if inlier_pts1.shape[0] < 8 or inlier_pts2.shape[0] < 8:
+            logger.warning("[WARNING] Not enough inlier points to estimate camera motion")
+            return None
 
+        _, R, t, mask = cv2.recoverPose(essential_matrix, inlier_pts1, inlier_pts2, self.K)
         return R, t
 
 
@@ -106,7 +102,7 @@ class FeatureExtractor:
                        keypoints1: List[cv2.KeyPoint],
                        keypoints2: List[cv2.KeyPoint],
                        current_frame: np.ndarray
-                       ) -> List[List[cv2.DMatch]]:
+                       ) -> List[Tuple[cv2.KeyPoint, cv2.KeyPoint]]:
 
         if (descriptors1 is None or descriptors2 is None or
                 len(descriptors1) == 0 or len(descriptors2) == 0):
