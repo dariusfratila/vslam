@@ -1,3 +1,8 @@
+'''
+TODO:
+-- implement corner detection using goodFeaturesToTrack
+'''
+
 import cv2
 import numpy as np
 import logging
@@ -20,6 +25,8 @@ class FeatureExtractor:
     def __init__(self, WIDTH: int, HEIGHT: int):
         self.orb_detector: cv2.ORB = cv2.ORB_create()  # type: ignore
         self.FLANN_INDEX_LSH = 6
+        self.WIDTH = WIDTH
+        self.HEIGHT = HEIGHT
         self.index_params = dict(algorithm=self.FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
         self.search_params = dict(checks=50)
         self.flann_matcher = cv2.FlannBasedMatcher(self.index_params, self.search_params)
@@ -42,11 +49,15 @@ class FeatureExtractor:
         if len(self.store_descriptors) == 2:
             (keypoints1, descriptor1), (keypoints2,
                                         descriptor2) = self.store_descriptors
+
             fundamental_matrix = self.estimate_camera_motion(keypoints1, keypoints2)
             logger.info(fundamental_matrix)
 
+
+
             self.match_features(descriptor1, descriptor2,
                                 keypoints1, keypoints2, current_frame)
+
 
         return list(keypoints), descriptors
 
@@ -58,7 +69,7 @@ class FeatureExtractor:
         keypoints1 = np.float32([kp.pt for kp in keypoints1])
         keypoints2 = np.float32([kp.pt for kp in keypoints2])
 
-        fundamental_matrix, _ = cv2.findFundamentalMat(keypoints1, keypoints2, cv2.FM_RANSAC)
+        fundamental_matrix, mask = cv2.findFundamentalMat(keypoints1, keypoints2, cv2.FM_RANSAC)
 
         if fundamental_matrix is None or fundamental_matrix.shape != (3, 3):
             logger.warning("[WARNING] Fundamental matrix computation failed!")
@@ -66,7 +77,14 @@ class FeatureExtractor:
 
         logger.info(f"Fundamental Matrix:\n{fundamental_matrix}")
 
-        essential_matrix, mask = cv2.findEssentialMat(keypoints1, keypoints2, self.K, method=cv2.RANSAC, threshold=1.0)
+        inlier_keypoints1 = keypoints1[mask.ravel() == 1]
+        inlier_keypoints2 = keypoints2[mask.ravel() == 1]
+
+        if len(inlier_keypoints1) < 8 or len(inlier_keypoints2) < 8:
+            logger.warning("[WARNING] Not enough inliers for essential matrix computation!")
+            return None
+
+        essential_matrix, mask_E = cv2.findEssentialMat(inlier_keypoints1, inlier_keypoints2, self.K, method=cv2.RANSAC, threshold=1.0)
 
         if essential_matrix is None:
             logger.warning("[WARNING] Essential matrix computation failed!")
@@ -74,7 +92,7 @@ class FeatureExtractor:
 
         logger.info(f"Essential Matrix:\n{essential_matrix}")
 
-        _, R, t, _ = cv2.recoverPose(essential_matrix, keypoints1, keypoints2, self.K)
+        _, R, t, _ = cv2.recoverPose(essential_matrix, inlier_keypoints1, inlier_keypoints2, self.K)
 
         logger.info(f"Rotation:\n{R}")
         logger.info(f"Translation:\n{t}")
@@ -106,7 +124,7 @@ class FeatureExtractor:
                 continue
 
             m, n = pair
-            if m.distance < 0.75 * n.distance:
+            if m.distance < 0.6 * n.distance:
                 good_matches.append((keypoints1[m.queryIdx], keypoints2[m.trainIdx]))
 
         self.visualize_features(good_matches, current_frame)
