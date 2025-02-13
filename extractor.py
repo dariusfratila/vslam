@@ -30,7 +30,6 @@ class FeatureExtractor:
             self.index_params, self.search_params)
         self.K: np.ndarray = np.array(
             [[554, 0, WIDTH // 2], [0, 554, HEIGHT // 2], [0, 0, 1]])
-
         self.previous_frame: Optional[np.ndarray] = None
         self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
             maxlen=2)
@@ -84,11 +83,19 @@ class FeatureExtractor:
                     pts1_normalized, pts2_normalized)
 
                 if extrinsic_matrix is None:
-                    logger.warning("[WARNING] Failed to estimate camera motion")
+                    logger.warning(
+                        "[WARNING] Failed to estimate camera motion")
+
+                else:
+                    # logger.info(f'Extrinsic matrix: {extrinsic_matrix}')
+                    # logger.info(
+                    #     f'Extrinsic matrix shape: {extrinsic_matrix.shape}')
+                    triangulated_points: np.ndarray = self.triangulation(
+                        pts1_normalized, pts2_normalized, np.eye(4), extrinsic_matrix)
+                    logger.info(
+                        f"Triangulated points shape: {triangulated_points.shape}")
 
         return keypoints, descriptors
-
-    from numpy.typing import NDArray
 
     def estimate_camera_motion(self, pts1: np.ndarray, pts2: np.ndarray) -> Optional[np.ndarray]:
         if pts1.shape[0] < 8 or pts2.shape[0] < 8:
@@ -119,23 +126,26 @@ class FeatureExtractor:
         extrinsic_matrix: np.ndarray = np.hstack((R, t.reshape(3, 1)))
         extrinsic_matrix = np.vstack((extrinsic_matrix, [0, 0, 0, 1]))
 
-        logger.info(f"Extrinsic matrix: {extrinsic_matrix}")
-
         return extrinsic_matrix
 
-    def triangulation(self, pts1: np.ndarray, pts2: np.ndarray, pose1: np.ndarray, pose2: np.ndarray):
+    def triangulation(self, pts1: np.ndarray, pts2: np.ndarray, pose1: np.ndarray, pose2: np.ndarray) -> np.ndarray:
         pts1_3D = np.ones((3, pts1.shape[0]))
         pts2_3D = np.ones((3, pts2.shape[0]))
 
-        logger.info(f"shape pts1_3D: {pts1_3D.shape}")
-        logger.info(f"shape pts2_3D: {pts2_3D.shape}")
+        pts1_3D[0], pts1_3D[1] = pts1[:, 0], pts1[:, 1]
+        pts2_3D[0], pts2_3D[1] = pts2[:, 0], pts2[:, 1]
 
-        logger.info(f'shape pose1: {pose1.shape}')
-        logger.info(f'shape pose2: {pose2.shape}')
-        # we want pts2 to be (1109, 3)
+        P1 = self.K @ pose1[:3, :]
+        P2 = self.K @ pose2[:3, :]
 
-        pts1_3D[0], pts1_3D[1] = pts1[:, 0].copy(), pts1[:, 1].copy()
-        pts2_3D[0], pts2_3D[1] = pts2[:, 0].reshape(-1), pts2[:, 1].reshape(-1)
+        P1 = P1.astype(np.float32)
+        P2 = P2.astype(np.float32)
+
+        pts_4D = cv2.triangulatePoints(P1, P2, pts1_3D[:2, :], pts2_3D[:2, :])
+
+        pts_4D /= pts_4D[3]
+
+        return pts_4D[:3].T
 
     def match_features(self,
                        descriptors1: Optional[np.ndarray],
