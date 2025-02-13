@@ -84,8 +84,7 @@ class FeatureExtractor:
                     pts1_normalized, pts2_normalized)
 
                 if extrinsic_matrix is None:
-                    logger.warning(
-                        "Extrinsic matrix computation failed, using default identity matrix.")
+                    logger.warning("[WARNING] Failed to estimate camera motion")
 
         return keypoints, descriptors
 
