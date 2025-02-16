@@ -20,7 +20,7 @@ logger = logging.getLogger("SLAM")
 
 
 class FeatureExtractor:
-    def __init__(self, WIDTH: int, HEIGHT: int):
+    def __init__(self, K: np.ndarray, WIDTH: int, HEIGHT: int):
         self.orb_detector: cv2.ORB = cv2.ORB_create()  # type: ignore
         self.FLANN_INDEX_LSH = 6
         self.WIDTH: int = WIDTH
@@ -30,8 +30,8 @@ class FeatureExtractor:
         self.search_params: dict = dict(checks=50)
         self.flann_matcher: cv2.FlannBasedMatcher = cv2.FlannBasedMatcher(
             self.index_params, self.search_params)
-        self.K: np.ndarray = np.array(
-            [[554, 0, WIDTH // 2], [0, 554, HEIGHT // 2], [0, 0, 1]])
+        self.K: np.ndarray = K
+        logger.info(f"Camera matrix: {self.K}")
         self.previous_frame: Optional[np.ndarray] = None
         self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
             maxlen=2)
@@ -42,7 +42,7 @@ class FeatureExtractor:
         triangulated_points: np.ndarray = np.array([])
 
         corners: Optional[np.ndarray] = cv2.goodFeaturesToTrack(
-            current_frame, 100, 0.001, 3)
+            current_frame, 3000, 0.001, 3)
 
         if corners is not None:
             keypoints: List[cv2.KeyPoint] = [cv2.KeyPoint(
@@ -81,15 +81,16 @@ class FeatureExtractor:
                         "[WARNING] Failed to estimate camera motion")
 
                 else:
-                    logger.info(f'Extrinsic matrix: {extrinsic_matrix}')
+                    # logger.info(f'Extrinsic matrix: {extrinsic_matrix}')
 
                     P1: np.ndarray = self.K @ np.hstack(
                         (np.eye(3), np.zeros((3, 1))))
                     P2: np.ndarray = self.K @ extrinsic_matrix[:3, :]
+
                     triangulated_points = self.triangulation(
                         pts1, pts2, P1, P2)
 
-                    logger.info(f"Triangulated points: {triangulated_points}")
+                    # logger.info(f"Triangulated points: {triangulated_points}")
 
         return keypoints, descriptors, triangulated_points
 
@@ -106,7 +107,7 @@ class FeatureExtractor:
             logger.warning("[WARNING] Essential matrix is None!")
             return None
 
-        logger.info(f"Essential matrix: {essential_matrix}")
+        # logger.info(f"Essential matrix: {essential_matrix}")
 
         inlier_pts1: np.ndarray = pts1[mask.ravel() == 1]
         inlier_pts2: np.ndarray = pts2[mask.ravel() == 1]
@@ -159,7 +160,7 @@ class FeatureExtractor:
                 continue
 
             m, n = pair
-            if m.distance < 0.75 * n.distance:
+            if m.distance < 0.60 * n.distance:
                 good_matches.append(
                     (keypoints1[m.queryIdx], keypoints2[m.trainIdx]))
 
