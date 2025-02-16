@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import logging
+import open3d as o3d
+
 
 from collections import deque
 from typing import Optional, List, Tuple
@@ -34,11 +36,13 @@ class FeatureExtractor:
         self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
             maxlen=2)
 
-    def extract_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], Optional[np.ndarray]]:
+    def extract_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], np.ndarray, np.ndarray]:
         current_frame: np.ndarray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
+        triangulated_points: np.ndarray = np.array([])
+
         corners: Optional[np.ndarray] = cv2.goodFeaturesToTrack(
-            current_frame, 3000, 0.001, 3)
+            current_frame, 100, 0.001, 3)
 
         if corners is not None:
             keypoints: List[cv2.KeyPoint] = [cv2.KeyPoint(
@@ -69,33 +73,25 @@ class FeatureExtractor:
                 pts2: np.ndarray = np.float32(
                     [kp2.pt for _, kp2 in good_features])  # type: ignore
 
-                pts1_homogeneous: np.ndarray = np.hstack(
-                    [pts1, np.ones((pts1.shape[0], 1))])
-                pts2_homogeneous: np.ndarray = np.hstack(
-                    [pts2, np.ones((pts2.shape[0], 1))])
-
-                pts1_normalized = (np.linalg.inv(self.K) @
-                                   pts1_homogeneous.T).T[:, :2]
-                pts2_normalized = (np.linalg.inv(self.K) @
-                                   pts2_homogeneous.T).T[:, :2]
-
                 extrinsic_matrix: Optional[np.ndarray] = self.estimate_camera_motion(
-                    pts1_normalized, pts2_normalized)
+                    pts1, pts2)
 
                 if extrinsic_matrix is None:
                     logger.warning(
                         "[WARNING] Failed to estimate camera motion")
 
                 else:
-                    # logger.info(f'Extrinsic matrix: {extrinsic_matrix}')
-                    # logger.info(
-                    #     f'Extrinsic matrix shape: {extrinsic_matrix.shape}')
-                    triangulated_points: np.ndarray = self.triangulation(
-                        pts1_normalized, pts2_normalized, np.eye(4), extrinsic_matrix)
-                    logger.info(
-                        f"Triangulated points shape: {triangulated_points.shape}")
+                    logger.info(f'Extrinsic matrix: {extrinsic_matrix}')
 
-        return keypoints, descriptors
+                    P1: np.ndarray = self.K @ np.hstack(
+                        (np.eye(3), np.zeros((3, 1))))
+                    P2: np.ndarray = self.K @ extrinsic_matrix[:3, :]
+                    triangulated_points = self.triangulation(
+                        pts1, pts2, P1, P2)
+
+                    logger.info(f"Triangulated points: {triangulated_points}")
+
+        return keypoints, descriptors, triangulated_points
 
     def estimate_camera_motion(self, pts1: np.ndarray, pts2: np.ndarray) -> Optional[np.ndarray]:
         if pts1.shape[0] < 8 or pts2.shape[0] < 8:
@@ -128,21 +124,11 @@ class FeatureExtractor:
 
         return extrinsic_matrix
 
-    def triangulation(self, pts1: np.ndarray, pts2: np.ndarray, pose1: np.ndarray, pose2: np.ndarray) -> np.ndarray:
-        pts1_3D = np.ones((3, pts1.shape[0]))
-        pts2_3D = np.ones((3, pts2.shape[0]))
+    def triangulation(self, pts1: np.ndarray, pts2: np.ndarray, P1: np.ndarray, P2: np.ndarray) -> np.ndarray:
+        pts1_2D = pts1.T
+        pts2_2D = pts2.T
 
-        pts1_3D[0], pts1_3D[1] = pts1[:, 0], pts1[:, 1]
-        pts2_3D[0], pts2_3D[1] = pts2[:, 0], pts2[:, 1]
-
-        P1 = self.K @ pose1[:3, :]
-        P2 = self.K @ pose2[:3, :]
-
-        P1 = P1.astype(np.float32)
-        P2 = P2.astype(np.float32)
-
-        pts_4D = cv2.triangulatePoints(P1, P2, pts1_3D[:2, :], pts2_3D[:2, :])
-
+        pts_4D = cv2.triangulatePoints(P1, P2, pts1_2D, pts2_2D)
         pts_4D /= pts_4D[3]
 
         return pts_4D[:3].T
@@ -173,7 +159,7 @@ class FeatureExtractor:
                 continue
 
             m, n = pair
-            if m.distance < 0.6 * n.distance:
+            if m.distance < 0.75 * n.distance:
                 good_matches.append(
                     (keypoints1[m.queryIdx], keypoints2[m.trainIdx]))
 
