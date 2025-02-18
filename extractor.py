@@ -32,7 +32,6 @@ class FeatureExtractor:
             self.index_params, self.search_params)
         self.K: np.ndarray = K
         logger.info(f"Camera matrix: {self.K}")
-        self.previous_frame: Optional[np.ndarray] = None
         self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
             maxlen=2)
 
@@ -42,7 +41,7 @@ class FeatureExtractor:
         triangulated_points: np.ndarray = np.array([])
 
         corners: Optional[np.ndarray] = cv2.goodFeaturesToTrack(
-            current_frame, 3000, 0.001, 3)
+            current_frame, 5000, 0.005, 2)
 
         if corners is not None:
             keypoints: List[cv2.KeyPoint] = [cv2.KeyPoint(
@@ -64,8 +63,6 @@ class FeatureExtractor:
             good_features: List[Tuple[cv2.KeyPoint, cv2.KeyPoint]] = self.match_features(descriptor1, descriptor2,
                                                                                          keypoints1, keypoints2, current_frame)
 
-            print(f"Number of good features: {len(good_features)}")
-
             if len(good_features) >= 8:
 
                 pts1: np.ndarray = np.float32(
@@ -73,10 +70,10 @@ class FeatureExtractor:
                 pts2: np.ndarray = np.float32(
                     [kp2.pt for _, kp2 in good_features])  # type: ignore
 
-                extrinsic_matrix: Optional[np.ndarray] = self.estimate_camera_motion(
+                extrinsic_matrix, final_pts1, final_pts2 = self.estimate_camera_motion(
                     pts1, pts2)
 
-                if extrinsic_matrix is None:
+                if extrinsic_matrix is None or final_pts1 is None or final_pts2 is None:
                     logger.warning(
                         "[WARNING] Failed to estimate camera motion")
 
@@ -87,27 +84,27 @@ class FeatureExtractor:
                         (np.eye(3), np.zeros((3, 1))))
                     P2: np.ndarray = self.K @ extrinsic_matrix[:3, :]
 
-                    triangulated_points = self.triangulation(
-                        pts1, pts2, P1, P2)
-
-                    # logger.info(f"Triangulated points: {triangulated_points}")
+                    if len(final_pts1) >= 8 and len(final_pts2) >= 8:
+                        triangulated_points = self.triangulation(
+                            final_pts1, final_pts2, P1, P2)
+                        # logger.info(
+                        #     f"Triangulated points: {triangulated_points}")
 
         return keypoints, descriptors, triangulated_points
 
-    def estimate_camera_motion(self, pts1: np.ndarray, pts2: np.ndarray) -> Optional[np.ndarray]:
+    def estimate_camera_motion(self, pts1: np.ndarray, pts2: np.ndarray):
         if pts1.shape[0] < 8 or pts2.shape[0] < 8:
             logger.warning(
                 "[WARNING] Not enough points to estimate camera motion!")
-            return None
+            return None, None, None
 
         essential_matrix, mask = cv2.findEssentialMat(
-            pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=1)
+            pts1, pts2, self.K, method=cv2.RANSAC, prob=0.999, threshold=1
+        )
 
         if essential_matrix is None:
             logger.warning("[WARNING] Essential matrix is None!")
-            return None
-
-        # logger.info(f"Essential matrix: {essential_matrix}")
+            return None, None, None
 
         inlier_pts1: np.ndarray = pts1[mask.ravel() == 1]
         inlier_pts2: np.ndarray = pts2[mask.ravel() == 1]
@@ -115,24 +112,32 @@ class FeatureExtractor:
         if inlier_pts1.shape[0] < 8 or inlier_pts2.shape[0] < 8:
             logger.warning(
                 "[WARNING] Not enough inlier points to estimate camera motion")
-            return None
+            return None, None, None
 
-        _, R, t, mask = cv2.recoverPose(
-            essential_matrix, inlier_pts1, inlier_pts2, self.K)
+        _, R, t, new_mask = cv2.recoverPose(
+            essential_matrix, inlier_pts1, inlier_pts2, self.K
+        )
 
-        extrinsic_matrix: np.ndarray = np.hstack((R, t.reshape(3, 1)))
-        extrinsic_matrix = np.vstack((extrinsic_matrix, [0, 0, 0, 1]))
+        final_inlier_pts1: np.ndarray = inlier_pts1[new_mask.ravel() == 255]
+        final_inlier_pts2: np.ndarray = inlier_pts2[new_mask.ravel() == 255]
 
-        return extrinsic_matrix
+        extrinsic_matrix: np.ndarray = np.eye(4, dtype=np.float64)
+        extrinsic_matrix[:3, :3] = R
+        extrinsic_matrix[:3, 3] = t.ravel()
+
+        return extrinsic_matrix, final_inlier_pts1, final_inlier_pts2
 
     def triangulation(self, pts1: np.ndarray, pts2: np.ndarray, P1: np.ndarray, P2: np.ndarray) -> np.ndarray:
         pts1_2D = pts1.T
         pts2_2D = pts2.T
 
         pts_4D = cv2.triangulatePoints(P1, P2, pts1_2D, pts2_2D)
+
         pts_4D /= pts_4D[3]
 
-        return pts_4D[:3].T
+        X_world = pts_4D[:3].T
+
+        return X_world
 
     def match_features(self,
                        descriptors1: Optional[np.ndarray],
