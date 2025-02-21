@@ -32,16 +32,17 @@ class FeatureExtractor:
             self.index_params, self.search_params)
         self.K: np.ndarray = K
         logger.info(f"Camera matrix: {self.K}")
-        self.store_descriptors: deque[Tuple[List[cv2.KeyPoint], np.ndarray]] = deque(
-            maxlen=2)
 
-    def extract_features(self, image: np.ndarray) -> Tuple[List[cv2.KeyPoint], np.ndarray, np.ndarray]:
-        current_frame: np.ndarray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        self.keyframes: List[np.ndarray] = []
+        self.trajectory: List[np.ndarray] = []
 
-        triangulated_points: np.ndarray = np.array([])
+        self.global_pose: np.ndarray = np.eye(4, dtype=np.float64)
+        self.last_keyframe_pose: np.ndarray = np.eye(4, dtype=np.float64)
+        self.current_camera_pose: np.ndarray = np.zeros(3, dtype=np.float64)
 
-        corners: Optional[np.ndarray] = cv2.goodFeaturesToTrack(
-            current_frame, 5000, 0.005, 2)
+    def extract_features(self, frame: np.ndarray):
+        current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        corners = cv2.goodFeaturesToTrack(current_frame, 1000, 0.01, 5)
 
         if corners is not None:
             keypoints: List[cv2.KeyPoint] = [cv2.KeyPoint(
@@ -52,45 +53,56 @@ class FeatureExtractor:
             keypoints, descriptors = self.orb_detector.detectAndCompute(
                 current_frame, None)  # type: ignore
 
-        if descriptors is not None:
-            self.store_descriptors.append(
-                (list(keypoints), descriptors))
+        logger.info(
+            f'Extracted {len(keypoints)} features from the current frame')
 
-        if len(self.store_descriptors) == 2:
-            (keypoints1, descriptor1), (keypoints2,
-                                        descriptor2) = self.store_descriptors
+        if not self.keyframes:
+            self.trajectory.append(self.current_camera_pose[:2])  # xy values
+            self.keyframes.append(
+                (keypoints, descriptors, self.global_pose.copy()))
+            logger.info("Initialized with first keyframe at pose [0, 0, 0]")
+            return keypoints, descriptors, None
 
-            good_features: List[Tuple[cv2.KeyPoint, cv2.KeyPoint]] = self.match_features(descriptor1, descriptor2,
-                                                                                         keypoints1, keypoints2, current_frame)
+        prev_keypoints, prev_descriptors, prev_pose = self.keyframes[-1]
+        good_matches = self.match_features(
+            prev_descriptors, descriptors, prev_keypoints, keypoints, current_frame)
 
-            if len(good_features) >= 8:
+        logger.info(
+            f'Matching with the previous keyframe: {len(good_matches)}')
 
-                pts1: np.ndarray = np.float32(
-                    [kp1.pt for kp1, _ in good_features])  # type: ignore
-                pts2: np.ndarray = np.float32(
-                    [kp2.pt for _, kp2 in good_features])  # type: ignore
+        if len(good_matches) >= 8:
+            pts1 = np.array([kp1.pt for kp1, _ in good_matches])
+            pts2 = np.array([kp2.pt for _, kp2 in good_matches])
+            camera_motion = self.estimate_camera_motion(pts1, pts2)
 
-                extrinsic_matrix, final_pts1, final_pts2 = self.estimate_camera_motion(
-                    pts1, pts2)
+            if camera_motion is not None:
+                extrinsic_matrix, inlier_pts1, inlier_pts2 = camera_motion
 
-                if extrinsic_matrix is None or final_pts1 is None or final_pts2 is None:
-                    logger.warning(
-                        "[WARNING] Failed to estimate camera motion")
+                self.global_pose = prev_pose @ extrinsic_matrix
+                R, t = self.global_pose[:3, :3], self.global_pose[:3, 3]
+                self.current_camera_pose = -R.T @ t
+                self.trajectory.append(self.current_camera_pose[:2])
+
+                if len(good_matches) < 40:
+                    self.keyframes.append(
+                        (keypoints, descriptors, self.global_pose.copy()))
+                    logger.info(
+                        "Matches < 70, added new keyframe to maintain tracking")
 
                 else:
-                    # logger.info(f'Extrinsic matrix: {extrinsic_matrix}')
+                    logger.info(
+                        "Matches >= 70, sufficient overlap with last keyframe, no new keyframe added")
 
-                    P1: np.ndarray = self.K @ np.hstack(
-                        (np.eye(3), np.zeros((3, 1))))
-                    P2: np.ndarray = self.K @ extrinsic_matrix[:3, :]
+            else:
+                logger.warning('Failed to estimate camera motion')
+                if self.trajectory:
+                    self.trajectory.append(self.trajectory[-1])
+        else:
+            logger.warning('Not enough matches to estimate camera motion')
+            if self.trajectory:
+                self.trajectory.append(self.trajectory[-1])
 
-                    if len(final_pts1) >= 8 and len(final_pts2) >= 8:
-                        triangulated_points = self.triangulation(
-                            final_pts1, final_pts2, P1, P2)
-                        # logger.info(
-                        #     f"Triangulated points: {triangulated_points}")
-
-        return keypoints, descriptors, triangulated_points
+        return keypoints, descriptors, None
 
     def estimate_camera_motion(self, pts1: np.ndarray, pts2: np.ndarray):
         if pts1.shape[0] < 8 or pts2.shape[0] < 8:
@@ -165,7 +177,7 @@ class FeatureExtractor:
                 continue
 
             m, n = pair
-            if m.distance < 0.60 * n.distance:
+            if m.distance < 0.50 * n.distance:
                 good_matches.append(
                     (keypoints1[m.queryIdx], keypoints2[m.trainIdx]))
 
